@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { createFlag, getFlag, listFlags, updateFlag, deleteFlag, hasFlag } from '../store/flagStore';
+import { createFlag, getFlag, listFlags, updateFlag, deleteFlag, isUniqueViolation } from '../store/flagStore';
 import { isEnabledForCaller } from '../lib/rollout';
 import { Flag } from '../types/flag';
 import { apiKeyAuth } from '../middleware/auth';
@@ -23,7 +23,7 @@ function paramKey(value: string | string[]): string {
   return Array.isArray(value) ? value[0] : value;
 }
 
-router.post('/flags', apiKeyAuth, standardLimiter, (req, res) => {
+router.post('/flags', apiKeyAuth, standardLimiter, async (req, res) => {
   const { key, enabled, environment, rollout_percentage } = req.body ?? {};
 
   if (typeof key !== 'string' || key.trim() === '') {
@@ -42,10 +42,6 @@ router.post('/flags', apiKeyAuth, standardLimiter, (req, res) => {
     res.status(400).json({ error: 'rollout_percentage must be a number between 0 and 100' });
     return;
   }
-  if (hasFlag(key)) {
-    res.status(409).json({ error: `flag with key "${key}" already exists` });
-    return;
-  }
 
   const now = new Date().toISOString();
   const flag: Flag = {
@@ -56,21 +52,30 @@ router.post('/flags', apiKeyAuth, standardLimiter, (req, res) => {
     created_at: now,
     updated_at: now,
   };
-  createFlag(flag);
+
+  try {
+    await createFlag(flag);
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      res.status(409).json({ error: `flag with key "${key}" already exists` });
+      return;
+    }
+    throw err;
+  }
   res.status(201).json(flag);
 });
 
-router.get('/flags', apiKeyAuth, standardLimiter, (req, res) => {
+router.get('/flags', apiKeyAuth, standardLimiter, async (req, res) => {
   const environment = req.query.environment;
   if (environment !== undefined && typeof environment !== 'string') {
     res.status(400).json({ error: 'environment must be a single string value' });
     return;
   }
-  res.json(listFlags(environment));
+  res.json(await listFlags(environment));
 });
 
-router.get('/flags/:key', apiKeyAuth, standardLimiter, (req, res) => {
-  const flag = getFlag(paramKey(req.params.key));
+router.get('/flags/:key', apiKeyAuth, standardLimiter, async (req, res) => {
+  const flag = await getFlag(paramKey(req.params.key));
   if (!flag) {
     res.status(404).json({ error: 'flag not found' });
     return;
@@ -78,12 +83,8 @@ router.get('/flags/:key', apiKeyAuth, standardLimiter, (req, res) => {
   res.json(flag);
 });
 
-router.patch('/flags/:key', apiKeyAuth, standardLimiter, (req, res) => {
+router.patch('/flags/:key', apiKeyAuth, standardLimiter, async (req, res) => {
   const key = paramKey(req.params.key);
-  if (!hasFlag(key)) {
-    res.status(404).json({ error: 'flag not found' });
-    return;
-  }
 
   const { enabled, environment, rollout_percentage } = req.body ?? {};
   if (enabled !== undefined && typeof enabled !== 'boolean') {
@@ -104,25 +105,30 @@ router.patch('/flags/:key', apiKeyAuth, standardLimiter, (req, res) => {
   if (environment !== undefined) updates.environment = environment;
   if (rollout_percentage !== undefined) updates.rollout_percentage = rollout_percentage;
 
-  res.json(updateFlag(key, updates));
+  const updated = await updateFlag(key, updates);
+  if (!updated) {
+    res.status(404).json({ error: 'flag not found' });
+    return;
+  }
+  res.json(updated);
 });
 
-router.delete('/flags/:key', apiKeyAuth, standardLimiter, (req, res) => {
-  if (!deleteFlag(paramKey(req.params.key))) {
+router.delete('/flags/:key', apiKeyAuth, standardLimiter, async (req, res) => {
+  if (!(await deleteFlag(paramKey(req.params.key)))) {
     res.status(404).json({ error: 'flag not found' });
     return;
   }
   res.status(204).send();
 });
 
-router.get('/evaluate/:key', apiKeyAuth, evaluateLimiter, (req, res) => {
+router.get('/evaluate/:key', apiKeyAuth, evaluateLimiter, async (req, res) => {
   const env = req.query.env;
   if (typeof env !== 'string' || env.trim() === '') {
     res.status(400).json({ error: 'env query parameter is required' });
     return;
   }
 
-  const flag = getFlag(paramKey(req.params.key));
+  const flag = await getFlag(paramKey(req.params.key));
   if (!flag || flag.environment !== env) {
     res.status(404).json({ error: 'flag not found for this key and environment' });
     return;

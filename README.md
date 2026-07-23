@@ -6,13 +6,30 @@ using consistent hashing.
 
 ## Setup
 
-Requires Node 18+.
+Requires Node 18+ and a Postgres database.
 
 ```bash
 npm install
 ```
 
-Flags are stored in memory and reset on restart — no database to set up.
+### Database
+
+Flags are persisted in Postgres. Bring one up locally with Docker:
+
+```bash
+docker compose up -d
+```
+
+This starts Postgres on `localhost:5432` with a `localops` user/db matching the app's
+default connection string, so no further config is needed for local dev. To point at a
+different database (e.g. a managed Postgres instance when deploying), set `DATABASE_URL`:
+
+```bash
+export DATABASE_URL=postgres://user:password@host:5432/dbname
+```
+
+The schema (a single `flags` table) is created automatically on server startup if it
+doesn't already exist — no separate migration step to run.
 
 Auth is a static API key check. By default the key `dev-key-123` is accepted. To use your
 own key(s), set `API_KEYS` (comma-separated for multiple) before starting the server:
@@ -199,10 +216,15 @@ src/
     auth.ts               API key check
     logger.ts             request logging
     rateLimiter.ts         token bucket rate limiter
+    errorHandler.ts        catches thrown/rejected errors, responds 500
   lib/
     rollout.ts             consistent-hash rollout evaluation
+  db/
+    pool.ts                pg connection pool
+    schema.ts               table definition (run on boot)
+    migrate.ts              runs schema.ts against the pool
   store/
-    flagStore.ts           in-memory flag storage
+    flagStore.ts           Postgres-backed flag CRUD
   types/
     flag.ts                Flag type
 ```
