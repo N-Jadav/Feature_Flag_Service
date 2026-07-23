@@ -13,4 +13,10 @@ export const SCHEMA_SQL = `
   );
 
   CREATE INDEX IF NOT EXISTS idx_flags_environment ON flags (environment);
+
+  CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+    key TEXT PRIMARY KEY,
+    tokens DOUBLE PRECISION NOT NULL,
+    last_refill TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
 `;

@@ -52,7 +52,8 @@ Other scripts:
 npm run build   # compile to dist/
 npm start       # run compiled build (after npm run build)
 npm run lint    # eslint
-npm test        # run unit tests (node:test, covers rollout hashing + rate limiter)
+npm test        # run tests (node:test) - rollout hashing is pure, rate limiter tests need a
+                # reachable Postgres (see Database below) since it's DB-backed
 ```
 
 ## Auth
@@ -74,7 +75,7 @@ The examples below all assume:
 export API_KEY=dev-key-123
 ```
 
-## Endpointsc
+## Endpoints
 
 ### Health check
 
@@ -166,6 +167,17 @@ Each API key gets its own token bucket per limiter tier:
 `/evaluate` gets a much bigger bucket since it's the high-traffic path client apps hit on
 every request, while flag management is low-volume admin traffic.
 
+Bucket state lives in a `rate_limit_buckets` table (one row per `tier:apiKey`), not in process
+memory, so quotas survive a restart and stay correct if you ever run more than one server
+instance against the same database. The refill-and-consume happens as a single atomic SQL
+statement (an `UPDATE`, or `INSERT ... ON CONFLICT DO UPDATE` for a brand new key), so
+concurrent requests for the same key can't race each other into over-consuming.
+
+The tradeoff: every rate-limited request now costs a DB round trip instead of an in-memory
+check. For a single Postgres instance that's still fast, but it does mean `/evaluate`'s
+throughput ceiling is now bounded by Postgres, not memory - worth knowing if you ever need to
+push this well past hundreds of requests/sec (see "What I'd do differently" below).
+
 Exceeding the limit returns `429` with a `Retry-After` header (seconds until a token is
 available):
 
@@ -228,3 +240,47 @@ src/
   types/
     flag.ts                Flag type
 ```
+
+## Design decisions
+
+- **`key` is globally unique; `environment` is just an attribute on it.** `/evaluate/:key?env=X`
+  checks that the flag's stored environment matches the requested one and 404s otherwise. The
+  alternative - keying on `(key, environment)` so one logical flag can have independently
+  configured rollouts per environment - is arguably more realistic for a real flag system, but
+  wasn't what the field list implied ("key (unique string)"). Easy to switch if that's wrong.
+- **Rollout bucketing** hashes `flagKey:callerId` (md5, stdlib `crypto`) into 0-99 and compares
+  against `rollout_percentage`, so a given caller always lands in the same bucket for a given
+  flag. Caller identity is `userId` if the client passes it, else the request IP - a weak proxy
+  (NAT, mobile networks) but there's no auth/session concept for end users here, only for API
+  callers.
+- **No ORM.** Plain `pg` and hand-written SQL - the query surface is small (one table's worth of
+  CRUD plus the rate limiter), and an ORM's abstraction wouldn't pay for itself at this size.
+- **Schema-on-boot instead of a migration tool.** `CREATE TABLE IF NOT EXISTS` run once at
+  startup. Fine while there's one schema shape and no migration history to sequence; not fine
+  once a real schema change (rename, backfill) needs to happen safely against live data.
+- **Auth is a static API key set from an env var**, not a user/key management system - there's
+  no signup flow or concept of "whose key is this," which is consistent with this being an
+  internal ops API rather than a multi-tenant product.
+- **Rate limiter state lives in Postgres**, not Redis or in-process memory, so it survives
+  restarts and stays correct across multiple instances - reusing the database the app already
+  requires rather than adding new infrastructure. The real cost is discussed below.
+
+## What I'd do differently with more time
+
+- **Rate limiter throughput.** Putting it in Postgres was the right call for correctness
+  (survives restarts, no new infra) but it puts a DB round trip on every single request,
+  including `/evaluate` - the endpoint most likely to see real volume. If this needed to scale
+  well past a few hundred req/sec, I'd move to Redis (`INCR`/Lua script, still O(1) and atomic)
+  or an in-memory limiter per instance with periodic async reconciliation to a shared store,
+  trading a little precision for not hitting the DB on every request.
+- **A real migration tool** (e.g. `node-pg-migrate`) as soon as there's a second schema change
+  to make against a database that already has data in it.
+- **Real API key management** - issuing, rotating, and revoking keys, and scoping them (e.g.
+  read-only vs. admin), instead of one static list from an env var.
+- **`/health` doesn't check the database.** Right now it's a pure liveness check; for a service
+  that's now stateful, a readiness check that verifies the DB connection would catch "process is
+  up but can't actually serve traffic" during rollout.
+- **Structured logging** (e.g. `pino`) shipped somewhere queryable, instead of `console.log` -
+  fine for local dev, not for debugging a real incident.
+- **Connection pool tuning** - currently using `pg`'s defaults (max 10 connections); worth
+  sizing deliberately against expected concurrency once this sees real traffic.

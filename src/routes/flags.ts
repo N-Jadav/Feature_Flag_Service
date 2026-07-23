@@ -10,8 +10,8 @@ const router = Router();
 // CRUD is low-volume, admin-style traffic. /evaluate is the hot path client apps hit on every
 // request, so it gets a much bigger bucket - it's the one endpoint that has to absorb bursts
 // without tripping the limiter.
-const standardLimiter = createRateLimiter({ capacity: 20, refillPerSec: 10 });
-const evaluateLimiter = createRateLimiter({ capacity: 200, refillPerSec: 100 });
+const standardLimiter = createRateLimiter({ name: 'standard', capacity: 20, refillPerSec: 10 });
+const evaluateLimiter = createRateLimiter({ name: 'evaluate', capacity: 200, refillPerSec: 100 });
 
 function isValidPercentage(n: unknown): n is number {
   return typeof n === 'number' && n >= 0 && n <= 100;
